@@ -9,3 +9,6 @@ file_paths_normal <- list.files(path = "./PRAD/Solid Tissue Normal", pattern = "
 normal <- lapply(file_paths_normal, function(x){read.table(x, header = FALSE, sep = "\t",row.names = 1)})
 normal <- do.call(cbind, normal)
 colnames(normal) <- metadata$cases.0.submitter_id[match(basename(file_paths_normal), metadata$file_name)]
+
+write.table(tumor,"./tumor_PRAD.tsv",sep = "\t",quote = FALSE)
+write.table(normal, "./normal_PRAD.tsv",sep = "\t",quote = FALSE)
