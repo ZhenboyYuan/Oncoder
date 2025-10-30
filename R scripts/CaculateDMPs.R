@@ -15,6 +15,7 @@ martix_names<-c("tumor_PRAD.tsv","normal_PRAD.tsv", "normal_plasma.tsv","ctProst
 matrix_list <- lapply(martix_names,function(x){read.table(paste0(x),header = T,sep = "\t",row.names = 1)})
 names(matrix_list) <- sub("\\.tsv$", "", martix_names)
 
+# Remove methylation probes with missing values in any sample.
 probs_to_keep <- Reduce(intersect, lapply(matrix_list, function(x)
   {rownames(na.omit(x))}))
 matrix_list <- lapply(matrix_list ,function(x) {x[probs_to_keep,]})
@@ -27,6 +28,7 @@ group_names <- names(matrix_list[1:3])
 groups <- factor(rep(group_names, times = group_sizes),levels = group_names)
 group_mapping <- data.frame(sample_id = colnames(beta_matrix),group = groups)
 
+# Transform the beta-value matrix into an M-value matrix using the logit function for subsequent statistical analyses.
 M_matrix <- pmin(pmax(as.matrix(beta_matrix), 1e-6), 1 - 1e-6) %>%
   qlogis()
 
@@ -44,10 +46,8 @@ plot_methylation_density  <- function(mat, filename) {
   panel.border = element_rect(color = "black", fill = NA, linewidth = 1))
 
 ggsave(filename, p, width = 8, height = 6, dpi = 300) }
-
 plot_methylation_density(beta_matrix[1:2000,],"Methylation_beta_value.jpg")
 plot_methylation_density(M_matrix[1:2000,],"Methylation_M_value.jpg")
-
 
 mean_beta <- apply(beta_matrix, 1, mean)
 var_beta  <- apply(beta_matrix, 1, var)
@@ -61,6 +61,7 @@ plot(mean_M, var_M,main = "",xlab = "Mean M-value",ylab = "Variance",   pch = 16
 grid()
 dev.off()
 
+# Identify tumor-specific DMPs
 design <- model.matrix(~0+groups)
 colnames(design) <- levels(groups)
 fit <- lmFit(M_matrix, design)
@@ -78,6 +79,7 @@ tumor_sig <- tumor_results %>% rownames_to_column("probe_id") %>%
   arrange(desc(abs(logFC))) %>% slice_head(n = 500) %>% 
   pull(probe_id)
 
+# Generate a heatmap of the top 500 tumor-specific sites
 annotation_col <- data.frame(Group = factor(rep(group_names, times = group_sizes), levels = group_names))
 rownames(annotation_col) <- colnames(beta_matrix)
 
@@ -93,6 +95,7 @@ pheatmap(
   show_colnames = FALSE,
   filename = "PRAD_top500.jpg")
 
+# Save the training and test sets for Oncoder
 train_matrix <- beta_matrix[tumor_sig,which(grepl("tumor",colnames(beta_matrix))|grepl("plasma",colnames(beta_matrix)))]
 ctProstate_Resistant<- matrix_list$ctProstate_Resistant[tumor_sig,]
 ctProstate_Sensitive <- matrix_list$ctProstate_Sensitive[tumor_sig,]
