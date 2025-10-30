@@ -12,23 +12,25 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.distributions as dist
 import torch.nn as nn
-from scipy.stats import wilcoxon
+from scipy.stats import wilcoxon, ttest_ind
 from torch.utils.data import Dataset
 from numpy.random import choice
 from torch.utils.data import Dataset
 from numpy.random import choice
 from scipy.stats import beta
+import warnings
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def reproducibility(seed=1):
+
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
-
+        torch.backends.cudnn.benchmark = False
 
 def showloss(loss):
     sns.set()
@@ -46,7 +48,6 @@ def showpcc(pred, truth):
 def showrmse(pred, truth):
     RMSE = np.sqrt(np.mean((pred[:, 1] - truth[:, 1]) ** 2))
     print(RMSE)
-
 
 class dataloader(Dataset):
     def __init__(self, X, Y):
@@ -114,7 +115,7 @@ class Autoencoder(nn.Module):
         w02 = (torch.mm(w01, w2))
         w03 = (torch.mm(w02, w3))
         w04 = (torch.mm(w03, w4))
-        return F.relu(w04)
+        return F.sigmoid(w04)
 
     def forward(self, x):
         methyatlas = self.methyatlas()
@@ -130,10 +131,6 @@ class Autoencoder(nn.Module):
 
 
 class NLLloss(nn.Module):
-    """
-    Negative log-likelihood function
-    """
-
     def __init__(self, df):
         super(NLLloss, self).__init__()
         self.alpha = torch.tensor(df['alpha'].astype('float64').values).to(device)
@@ -145,9 +142,9 @@ class NLLloss(nn.Module):
     def forward(self, data, state):
         beta_distribution = dist.Beta(self.alpha, self.beta)
         if state == 'H':
-            prob_data = beta_distribution.log_prob(torch.clamp(data[0], 0, 1)).exp()  # health
+            prob_data = beta_distribution.log_prob(torch.clamp(data[0], 0, 1)).exp()  
         elif state == 'T':
-            prob_data = beta_distribution.log_prob(torch.clamp(data[1], 0, 1)).exp()  # Tumor
+            prob_data = beta_distribution.log_prob(torch.clamp(data[1], 0, 1)).exp()
         normalized_pdf = prob_data / self.mode_pdf
         normalized_pdf = torch.clamp(normalized_pdf, 1e-20, 1)
         nll_loss = -torch.log(normalized_pdf)
@@ -157,7 +154,14 @@ class NLLloss(nn.Module):
 
 def filterdata(data):
     """
-    Filter for abnormal methylation values
+    This function filters outliers from the data using a threshold based on 4 * standard deviation.
+    Args:
+        data: numpy.ndarray
+            The input data array of shape (samples,).
+        
+    Returns:
+        filtered_data: numpy.ndarray
+            the filtered data array of shape (samples,).
     """
     mean_value = np.mean(data)
     std_dev = np.std(data)
@@ -169,9 +173,17 @@ def filterdata(data):
 
 def evaluateBetapara(filepath, typename):
     """
-    Filepath should be the path of reference data, reference data should be a CpG*sample matrix,not null value,sep='\t',
-    index should be CpG and columns should be sample type('GSE40279','LIHC')
-    typename: the name of the data type need to fit beta distribution
+    This function evaluates the parameters of the beta distribution for each CpG site.
+    Args:
+        filepath: str
+            The file path of reference data.
+        typename: str
+            The type of samples to evaluate ('plasma' or 'tumor').
+    Returns:
+        except_cpg: list
+            A list of CpG sites that were excluded due to fitting errors.
+        betadf: DataFrame
+            A DataFrame containing the beta distribution parameters for each CpG site.
     """
     n = pd.read_csv(filepath, sep='\t', index_col=0, header=0)
     n.replace({0: 0.0001, 1: 0.9999}, inplace=True)
@@ -195,41 +207,79 @@ def evaluateBetapara(filepath, typename):
     betadf = pd.DataFrame.from_dict(dic, orient='index')
     betadf.drop(columns=[2, 3], inplace=True)
     betadf.columns = ['alpha', 'beta', 'mode', 'mode_pdf']
-    return except_cpg, betadf, n
+    return except_cpg, betadf
 
 
-def training(model, data_loader, betadf, epochs=256, seed=1):
+def training(model, data_loader, betadf, epochs=256, seed=1, lr=1e-4):
+    """
+    This function trains the Oncoder model.
+    Args:
+        model: Autoencoder
+            The Oncoder model to be trained.
+        data_loader: DataLoader
+            The DataLoader containing training data and labels.
+        betadf: list of DataFrame
+            A list containing two DataFrames with beta distribution parameters for healthy and tumor samples.
+        epochs: int, optional 
+            The number of training epochs, by default 256.
+        seed: int, optional
+            A seed for the random number generator for reproducibility, 
+            by default 1.
+        lr: float, optional
+            The learning rate for the optimizer, by default 1e-4.
+    Returns:
+        model : Autoencoder
+            The trained Oncoder model.
+        loss : list
+            A list of loss values during training.
+        recon_loss : list
+            A list of reconstruction loss values during training.
+        methyH_loss : list
+            A list of healthy methylation loss values during training.
+        methyT_loss : list
+            A list of tumor methylation loss values during training.
+    """
     decoder_parameters = [{'params': [p for n, p in model.named_parameters() if 'decoder' in n]}]
     encoder_parameters = [{'params': [p for n, p in model.named_parameters() if 'encoder' in n]}]
-    optimizerD = torch.optim.Adam(decoder_parameters, lr=1e-4)
-    optimizerE = torch.optim.Adam(encoder_parameters, lr=1e-4)
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    optimizerD = torch.optim.Adam(decoder_parameters, lr=lr)
+    optimizerE = torch.optim.Adam(encoder_parameters, lr=lr)
+    optimizer = Adam(model.parameters(), lr=lr)
     loss = []
     recon_loss = []
     mylossH = NLLloss(betadf[0]).to(device)
     mylossT = NLLloss(betadf[1]).to(device)
     methyH_loss = []
     methyT_loss = []
-    model.train()
-    model.state = 'train'
-    for i in tqdm(range(epochs)):
+    for i in range(epochs):
+        model.train()
+        model.state = 'train'
+        epoch_comp_loss_sum = 0.0
+        epoch_recon_loss_sum = 0.0
+        epoch_methyH_loss_sum = 0.0
+        epoch_methyT_loss_sum = 0.0
+        batch_size = 0
+        samples_size = 0
+        
         for k, (data, label) in enumerate(data_loader):
             reproducibility(seed)
+            batch_size = data.shape[0]
+            samples_size += batch_size
+            
             optimizer.zero_grad()
             x_recon, comp_prop, methy = model(data)
-            batch_loss = 0.25 * F.l1_loss(comp_prop, label) + 0.25 * F.l1_loss(x_recon, data) + 0.25 * mylossH(methy,'H') + 0.5 * mylossT(methy, 'T')
+            batch_loss =  0.25 * F.l1_loss(comp_prop, label) + 0.25 * F.l1_loss(x_recon, data) + 0.25 * mylossH(methy,'H') + 0.5 * mylossT(methy, 'T')
             batch_loss.backward()
             optimizer.step()
 
             optimizerD.zero_grad()
             x_recon, _, methy = model(data)
-            batch_loss = F.l1_loss(x_recon, data) + mylossH(methy, 'H') + mylossT(methy, 'T')
+            batch_loss =  F.l1_loss(x_recon, data) + mylossH(methy, 'H') + mylossT(methy, 'T')
             batch_loss.backward()
             optimizerD.step()
 
             optimizerE.zero_grad()
             x_recon, comp_prop, _ = model(data)
-            batch_loss = F.l1_loss(label, comp_prop) + F.l1_loss(x_recon, data)
+            batch_loss =  F.l1_loss(label, comp_prop) + F.l1_loss(x_recon, data)
             batch_loss.backward()
             optimizerE.step()
 
@@ -237,26 +287,59 @@ def training(model, data_loader, betadf, epochs=256, seed=1):
             recon_loss.append(F.l1_loss(x_recon, data).cpu().detach().numpy())
             methyH_loss.append(mylossH(methy, 'H').cpu().detach().numpy())
             methyT_loss.append(mylossT(methy, 'T').cpu().detach().numpy())
+            
+            epoch_comp_loss_sum +=  F.l1_loss(comp_prop, label).item() * batch_size
+            epoch_recon_loss_sum += F.l1_loss(x_recon, data).item() * batch_size
+            epoch_methyH_loss_sum += mylossH(methy,'H').item() * batch_size
+            epoch_methyT_loss_sum += mylossT(methy, 'T').item() * batch_size
+            
+        if samples_size > 0:
+            avg_comp = epoch_comp_loss_sum / samples_size
+            avg_recon = epoch_recon_loss_sum / samples_size
+            avg_methyH = epoch_methyH_loss_sum / samples_size
+            avg_methyT = epoch_methyT_loss_sum / samples_size
+            print(f"Epoch {i+1}/{epochs} | Comp: {avg_comp:.4f} | Recon: {avg_recon:.4f} | Methy-H: {avg_methyH:.4f} | Methy-T: {avg_methyT:.4f}")
     return model, loss, recon_loss, methyH_loss, methyT_loss
 
 
-def train_Oncoder(train_x, train_y, refdatapath, model_name=None, batch_size=128, epochs=256, seed=1):
+def train_Oncoder(train_x, train_y,refpath, model_name=None, batch_size=128, epochs=256, seed=1,lr=1e-4):
+    """
+    This function trains the Oncoder model.
+    
+    Args:
+        train_x: numpy.ndarray
+            The training data matrix of shape (samples, cpg_sites).
+        train_y: numpy.ndarray
+            The training labels matrix of shape (samples, tumor_fractions).
+        refpath: str
+            The file path of reference data.
+        model_name: str, optional
+            The name to save the trained model, by default None.
+        batch_size: int, optional
+            The batch size for training, by default 128.
+        epochs: int, optional
+            The number of training epochs, by default 256.
+        seed: int, optional
+            A seed for the random number generator for reproducibility, 
+            by default 1.
+        lr: float, optional
+            The learning rate for the optimizer, by default 1e-4.
+    Returns:
+        model: Autoencoder
+            The trained Oncoder model. 
+    """
     print('Loading data')
     data_loader = DataLoader(dataloader(train_x, train_y), batch_size=batch_size, shuffle=True)
     model = Autoencoder(train_x.shape[1], train_y.shape[1]).to(device)
-    _, H_beta, _ = evaluateBetapara(refdatapath, 'GSE40279')
-    _, T_beta, _ = evaluateBetapara(refdatapath, 'LIHC')
+    _, H_beta = evaluateBetapara(refpath, 'plasma')
+    _, T_beta = evaluateBetapara(refpath, 'tumor')
     beta_df = [H_beta, T_beta]
     print('Start training')
-    model, loss, recon_loss, methyH_loss, methyT_loss = training(model, data_loader, beta_df, epochs=epochs, seed=seed)
+    model, loss, recon_loss, methyH_loss, methyT_loss = training(model, data_loader, beta_df, epochs=epochs, seed=seed, lr=lr)
     print('training done')
-    print('prediction loss: ')
     showloss(loss)
-    print('reconstruction loss: ')
     showloss(recon_loss)
-    print('Health NLL loss: ')
     showloss(methyH_loss)
-    print('Cancer NLL loss: ')
     showloss(methyT_loss)
     if model_name is not None:
         print('Model is saved')
@@ -264,11 +347,33 @@ def train_Oncoder(train_x, train_y, refdatapath, model_name=None, batch_size=128
     return model
 
 
-def predict(test_x, model=None, model_name=None):
-    if model_name is not None and model is None:
-        model = torch.load(model_name + '.pth')
-    elif model is not None and model_name is None:
-        model = model
+def predict(test_x, model=None, model_path=None):
+    """
+    This function predicts tumor fractions using the trained Oncoder model.
+
+    Args:
+        test_x: numpy.ndarray: 
+            The test data matrix of shape (samples, cpg_sites).
+        model: Autoencoder: 
+            The pre-loaded trained Oncoder model.
+        model_name: str, optional: 
+            The file path of the saved trained model. Defaults to None.
+
+    Returns:
+        pred: numpy.ndarray: 
+            The predicted tumor fractions of shape (samples, tumor_fractions).
+        methyatlas: torch.Tensor: 
+            The methylation atlas learned by the model.
+    """
+    if model is None and model_path is None:
+        raise ValueError("Either model or model_path must be provided.")
+    print('Start prediction')
+    if model is not None and model_path is not None:
+        warnings.warn("Both model and model_path are provided. The model will be used for prediction.",UserWarning)
+        
+    if model is None:
+        print('loading model')
+        model = torch.load(model_path)
     model.eval()
     model.state = 'test'
     data = torch.from_numpy(test_x).float().to(device)
@@ -278,17 +383,32 @@ def predict(test_x, model=None, model_name=None):
     return pred, methyatlas
 
 
-def generate_simulated_data(refdata, prior=[0.9, 0.1], samplenum=5000, random_state=1, method='Dirichlet'):
+def generate_simulated_data(refpath, prior=[0.9, 0.1], samplenum=5000, random_state=1, method='Dirichlet'):
     """
-    Reference data should be a CpG*sample matrix,not null value,sep='\t', index should be CpG and columns should be sample type('GSE40279','LIHC')
-    The tumor fraction generated by Dirichlet or Uniform distribution
-
+    This function generates simulated data with tumor fraction labels based on dirichlet or uniform distribution.
+    
+    Args:
+        refpath: the file path of reference data, str
+            The file contains a matrix of CpG sites by samples. The index should be CpG sites, and columns should represent sample types 
+            ('plasma_1', 'plasma_2',...'plasma_n', 'tumor_1', 'tumor_2',...'tumor_n'). Should not contain null values.
+        samplenum: int, optional
+            The number of simulated samples to generate, by default 5000.
+        random_state: int, optional
+            A seed for the random number generator for reproducibility, 
+            by default 1.
+        method: {'Dirichlet', 'Uniform'}, optional
+            The method to generate tumor fractions, by default 'Dirichlet'.
+    
+    Returns: 
+        x: numpy.ndarray
+            The simulated data matrix of shape (samples, cpg_sites).
+        y: numpy.ndarray
+            The simulated labels matrix of shape (samples, tumor_fractions). Column 1: Healthy fractions; Column 2: Tumor fractions.
     """
+    
     print("reading ref dataset")
-    n = pd.read_csv(refdata, sep='\t', index_col=0, header=0)
-    n.columns = [i.split('.')[0] for i in n.columns]
-    to_drop = [col for col in n.columns if "Liver" in col]  # delete the adjacent non-tumor tissues columns
-    n.drop(to_drop, axis=1, inplace=True)
+    n = pd.read_csv(refpath, sep='\t', index_col=0, header=0)
+    n.columns = [i.split('_')[0] for i in n.columns]
     n = n.T
     n['sampletype'] = n.index
     n.index = range(len(n))
@@ -310,23 +430,55 @@ def generate_simulated_data(refdata, prior=[0.9, 0.1], samplenum=5000, random_st
     sample = np.zeros((prop.shape[0], n.shape[1]))
     prop = pd.DataFrame(prop, columns=['H','T'])
     for i, sample_prop in tqdm(prop.iterrows()):
-        sample[i] = sample_prop["H"] * n.iloc[choice(sampletype_groups["GSE40279"])] + sample_prop["T"] * n.iloc[choice(sampletype_groups["LIHC"])]
+        sample[i] = sample_prop["H"] * n.iloc[choice(sampletype_groups["plasma"])] + sample_prop["T"] * n.iloc[choice(sampletype_groups["tumor"])]
     train_x = pd.DataFrame(sample, columns=cpgname)
     train_y = prop
     return train_x.values, train_y.values
 
-def adaptive_learning(model, X, y, refdatapath, epochs=256, seed=1, batch_size=128):
+def adaptive_learning(model, X, y, refdatapath, epochs=256, seed=1, batch_size=128, lr=1e-4):
+    """
+    This function performs adaptive learning on the Oncoder model using new data.
+    Args:
+        model: Autoencoder
+            The pre-trained Oncoder model to be fine-tuned.
+        X: numpy.ndarray
+            The new data matrix of shape (samples, cpg_sites).
+        y: numpy.ndarray
+            The new labels matrix of shape (samples, tumor_fractions).
+        refdatapath: str
+            The file path of additional reference data.
+        epochs: int, optional
+            The number of training epochs for fine-tuning, by default 256.
+        seed: int, optional
+            A seed for the random number generator for reproducibility, 
+            by default 1.
+        batch_size: int, optional
+            The batch size for training, by default 128.
+        lr: float, optional
+            The learning rate for the optimizer, by default 1e-4.
+    Returns:
+        model: Autoencoder
+            The fine-tuned Oncoder model.
+        loss: list
+            A list of loss values during fine-tuning.
+        recon_loss: list
+            A list of reconstruction loss values during fine-tuning.
+        methyH_loss: list
+            A list of healthy methylation loss values during fine-tuning.
+        methyT_loss: list
+            A list of tumor methylation loss values during fine-tuning.
+    """
     print('adaptive stage')
     data_loader = DataLoader(dataloader(X, y), batch_size=batch_size, shuffle=True)
     decoder_parameters = [{'params': [p for n, p in model.named_parameters() if 'decoder' in n]}]
     encoder_parameters = [{'params': [p for n, p in model.named_parameters() if 'encoder' in n]}]
-    optimizerD = torch.optim.Adam(decoder_parameters, lr=1e-4)
-    optimizerE = torch.optim.Adam(encoder_parameters, lr=1e-4)
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    optimizerD = torch.optim.Adam(decoder_parameters, lr=lr)
+    optimizerE = torch.optim.Adam(encoder_parameters, lr=lr)
+    optimizer = Adam(model.parameters(), lr=lr)
     loss = []
     recon_loss = []
-    _, H_beta, _ = evaluateBetapara(refdatapath, 'GSE40279')
-    _, T_beta, _ = evaluateBetapara(refdatapath, 'LIHC')
+    _, H_beta, _ = evaluateBetapara(refdatapath, 'plasma')
+    _, T_beta, _ = evaluateBetapara(refdatapath, 'tumor')
     betadf = [H_beta, T_beta]
     mylossH = NLLloss(betadf[0]).to(device)
     mylossT = NLLloss(betadf[1]).to(device)
@@ -364,3 +516,4 @@ def adaptive_learning(model, X, y, refdatapath, epochs=256, seed=1, batch_size=1
     model.eval()
     model.state = 'test'
     return model, loss, recon_loss, methyH_loss, methyT_loss
+
