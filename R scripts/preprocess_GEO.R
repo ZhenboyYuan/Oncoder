@@ -8,13 +8,15 @@ metadata_plasma <- pData(geoMat_plasma)
 metadata_plasma <- metadata_plasma[, c("title", "geo_accession")]
 metadata_plasma <- metadata_plasma[match(metadata_plasma$geo_accession, colnames(normal_plasma)),]
 
-write.table(normal_plasma ,file = "normal_plasma.tsv",sep = "\t",quote = FALSE)
+write.table(normal_plasma,file = "normal_plasma.tsv",sep = "\t",quote = FALSE)
 write.table(metadata_plasma,"metadata_normal_plasma.tsv",sep = "\t",quote = FALSE)
 
 
 # Preprocessing the cfDNA methylation matrix from 31 prostate cancer samples.
 library(data.table)
 options(timeout = 5000)
+geoMat_ctProstate <- getGEO("GSE108462")[[1]]
+
 ctProstate <- fread("/path/to/GSE108462_Unnormalised_signal.csv.gz")
 ctProstate <- as.data.frame(ctProstate)
 rownames(ctProstate) <- ctProstate$ID_REF
