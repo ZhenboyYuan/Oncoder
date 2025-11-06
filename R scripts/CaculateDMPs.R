@@ -53,11 +53,13 @@ mean_beta <- apply(beta_matrix, 1, mean)
 var_beta  <- apply(beta_matrix, 1, var)
 mean_M <- apply(M_matrix, 1, mean)
 var_M  <- apply(M_matrix, 1, var) 
-jpeg("variance.beta_vs_M.jpg", width = 8, height = 6, res = 300 , units = 'in')
-par(mfrow = c(1, 2), mar = c(5, 5, 4, 2))
-plot(mean_beta,var_beta,main = "",xlab = "Mean Beta-value",ylab = "Variance",   pch = 16,cex = 0.8, col = "#00000033")
+jpeg("variance.beta_vs_M.jpg", width = 16, height = 6, res = 300, units = 'in')
+par(mfrow = c(1, 2),mar = c(5.1, 5.1, 4.1, 2.1))
+plot(mean_beta,var_beta,main = "",xlab = "Mean Beta-value",ylab = "Variance Beta-value",
+  pch = 16,cex = 0.4, col = "#8B000033" , cex.lab = 1.4,cex.axis = 1.2) 
 grid()
-plot(mean_M, var_M,main = "",xlab = "Mean M-value",ylab = "Variance",   pch = 16,cex = 0.8,col = "#8B000033")
+plot(mean_M, var_M,main = "",xlab = "Mean M-value",ylab = "VarianceM-value",
+  pch = 16,cex = 0.4,col = "#8B000033", cex.lab = 1.4,cex.axis = 1.2)
 grid()
 dev.off()
 
